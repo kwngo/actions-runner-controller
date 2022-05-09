@@ -33,6 +33,8 @@ import (
 
 	"github.com/actions-runner-controller/actions-runner-controller/api/v1alpha1"
 	"github.com/actions-runner-controller/actions-runner-controller/github"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // RunnerReplicaSetReconciler reconciles a Runner object
@@ -57,12 +59,17 @@ const (
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 func (r *RunnerReplicaSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+
+	traceName := "runner-replica-set-reconciler"
 	log := r.Log.WithValues("runnerreplicaset", req.NamespacedName)
 
+	_, span := otel.Tracer(traceName).Start(ctx, "GetRunners")
+	span.SetAttributes(attribute.String("namespace", req.NamespacedName))
 	var rs v1alpha1.RunnerReplicaSet
 	if err := r.Get(ctx, req.NamespacedName, &rs); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	span.End()
 
 	if !rs.ObjectMeta.DeletionTimestamp.IsZero() {
 		// RunnerReplicaSet cannot be gracefuly removed.
@@ -98,6 +105,8 @@ func (r *RunnerReplicaSetReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Get the Runners managed by the target RunnerReplicaSet
 	var runnerList v1alpha1.RunnerList
+	_, span = otel.Tracer(traceName).Start(ctx, "ListRunners")
+	span.SetAttributes(attribute.String("namespace", req.NamespacedName))
 	if err := r.List(
 		ctx,
 		&runnerList,
@@ -108,6 +117,7 @@ func (r *RunnerReplicaSetReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 	}
+	span.End()
 
 	replicas := 1
 	if rs.Spec.Replicas != nil {
@@ -117,12 +127,15 @@ func (r *RunnerReplicaSetReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	effectiveTime := rs.Spec.EffectiveTime
 	ephemeral := rs.Spec.Template.Spec.Ephemeral == nil || *rs.Spec.Template.Spec.Ephemeral
 
+	_, span = otel.Tracer(traceName).Start(ctx, "NewRunner")
+	span.SetAttributes(attribute.String("namespace", req.NamespacedName))
 	desired, err := r.newRunner(rs)
 	if err != nil {
 		log.Error(err, "Could not create runner")
 
 		return ctrl.Result{}, err
 	}
+	span.End()
 
 	var live []client.Object
 	for _, r := range runnerList.Items {
@@ -155,12 +168,16 @@ func (r *RunnerReplicaSetReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		updated := rs.DeepCopy()
 		updated.Status = status
 
+		_, span = otel.Tracer(traceName).Start(ctx, "PatchRunnerReplicaStatus")
+		span.SetAttributes(attribute.String("namespace", req.NamespacedName))
+
 		if err := r.Status().Patch(ctx, updated, client.MergeFrom(&rs)); err != nil {
 			log.Info("Failed to update runnerreplicaset status. Retrying immediately", "error", err.Error())
 			return ctrl.Result{
 				Requeue: true,
 			}, nil
 		}
+		span.End()
 	}
 
 	return ctrl.Result{}, nil
